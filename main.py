@@ -1,15 +1,18 @@
 from selenium import webdriver
-from selenium.common import TimeoutException
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
 import pandas as pd
 import os
+import sys
 from dotenv import load_dotenv
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import date, datetime
 import pytz
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -49,68 +52,125 @@ def acc_log_out(driver):
         print("Failed to Log Out!")
 
 
-def get_table(email, password) -> (list[str], list[list[str]]):
-    # Launch browser
-    driver = webdriver.Chrome()
-    driver.get("https://acumen.dcisoftware.com/")
+def set_chrome_options():
+    """Configure Chrome options for both Windows and Linux"""
+    chrome_options = Options()
 
-    # Fill credentials and click submit
-    driver.find_element(By.ID, "Email").send_keys(email)
-    driver.find_element(By.ID, "Password").send_keys(password)
-    driver.find_element(By.ID, "btnSubmit").click()
+    # Platform-specific configurations
+    if sys.platform == 'linux':
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--window-size=1920,1080")
 
-    # Checks for confirm continue login popup
+    # Common configurations
+    chrome_options.add_argument("--log-level=3")
+    chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
+    chrome_options.add_argument("--disable-background-networking")
+    chrome_options.add_argument("--disable-default-apps")
+    chrome_options.add_argument("--disable-extensions")
+
+    return chrome_options
+
+
+def initialize_driver():
+    """Initialize WebDriver with platform-specific settings"""
+    chrome_options = set_chrome_options()
+
     try:
-        WebDriverWait(driver, 1).until(
-            lambda d: d.find_element(By.ID, "confirmContinueLogin").is_displayed()
-        )
-        driver.find_element(By.ID, "btnContnueLogin").click()
+        if sys.platform == 'linux':
+            return webdriver.Chrome(
+                executable_path="/usr/local/bin/chromedriver",
+                options=chrome_options
+            )
+        else:  # Windows/Mac
+            return webdriver.Chrome(options=chrome_options)
+    except WebDriverException as e:
+        print(f"Failed to initialize WebDriver: {str(e)}")
+        raise
 
-    except TimeoutException:
-        print("Login Ok?")
 
+def handle_login(driver, email, password):
+    """Handle the login process with error checking"""
     try:
-        # Wait for home page to load to find Entries Button
-        entries_btn = WebDriverWait(driver, 5).until(
+        driver.get("https://acumen.dcisoftware.com/")
+
+        # Fill credentials
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "Email"))
+        ).send_keys(email)
+
+        driver.find_element(By.ID, "Password").send_keys(password)
+        driver.find_element(By.ID, "btnSubmit").click()
+
+        # Handle potential confirmation popup
+        try:
+            WebDriverWait(driver, 2).until(
+                lambda d: d.find_element(By.ID, "confirmContinueLogin").is_displayed()
+            )
+            driver.find_element(By.ID, "btnContnueLogin").click()
+        except TimeoutException:
+            pass
+
+        return True
+    except Exception as e:
+        print(f"Login failed: {str(e)}")
+        return False
+
+
+def get_table_data(driver):
+    """Extract table headers and data"""
+    try:
+        # Wait for and click entries button
+        WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.ID, "leftmenuLinkEmployerPunches"))
+        ).click()
+
+        # Extract headers
+        table_thead = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "#tblPunches thead"))
         )
-        entries_btn.click()
-        print("Login is Ok.")
+        header = [header.text for header in table_thead.find_elements(By.CSS_SELECTOR, "tr th")]
+
+        # Extract data
+        punches_table = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "#tblPunches tbody"))
+        )
+        rows = punches_table.find_elements(By.TAG_NAME, "tr")
+        data = [[cell.text for cell in row.find_elements(By.TAG_NAME, "td")] for row in rows]
+
+        return header, data
     except TimeoutException:
-        print("We have failed to load into the home page. Did we sign in correctly?")
-        return  # Terminate Script
+        print("Failed to locate table elements")
+        return None, None
 
-    # try:
-    #     # Wait for home page to load to find Entries Button
-    #     loadMoreBtn = WebDriverWait(driver, 1).until(
-    #         EC.element_to_be_clickable((By.ID, "btnLoadmore"))
-    #     )
-    #     loadMoreBtn.click()
-    # except TimeoutException:
-    #     print("No more new entries loaded.")
 
-    # Extract table's header from thead
-    table_thead = WebDriverWait(driver, 10).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "#tblPunches thead"))
-    )
-    table_ths = table_thead.find_elements(By.CSS_SELECTOR, "tr th")
-    header = [header.text for header in table_ths]
+def get_table(email: str, password: str) -> tuple[list[str], list[list[str]]]:
+    """Main function to retrieve table data"""
+    driver = None
+    try:
+        driver = initialize_driver()
 
-    # Extract table's data from tbody
-    punches_table = WebDriverWait(driver, 10).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "#tblPunches tbody"))
-    )
-    rows = punches_table.find_elements(By.TAG_NAME, "tr")
-    data = []
-    for row in rows:
-        cells = row.find_elements(By.TAG_NAME, "td")
-        data.append([cell.text for cell in cells])
+        if not handle_login(driver, email, password):
+            return [], []
 
-    # Sign out and quit driver
-    acc_log_out(driver)
-    driver.quit()
+        header, data = get_table_data(driver)
+        if header is None or data is None:
+            return [], []
 
-    return header, data
+        return header, data
+
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
+        return [], []
+    finally:
+        if driver:
+            try:
+                # Try to sign out if possible
+                acc_log_out(driver)
+            except:
+                pass
+            driver.quit()
 
 
 def to_dataframe(table_header, table_data, emp_name) -> pd.DataFrame:
