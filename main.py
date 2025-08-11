@@ -6,7 +6,7 @@ from selenium.webdriver.support import expected_conditions as EC
 import pandas as pd
 import os
 from dotenv import load_dotenv
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import date, datetime
 import pytz
@@ -14,27 +14,23 @@ import pytz
 # Load environment variables from .env file
 load_dotenv()
 
-# Define scopes (read/write access)
 SCOPES = ['https://www.googleapis.com/auth/calendar.events']
+SERVICE_ACCOUNT_PATH = 'acumen-entries-extractor-d2640e073bc3.json'
 
 
 def authenticate():
-    flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-    creds = flow.run_local_server(port=0)  # Opens browser for auth
+    creds = service_account.Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_PATH,
+        scopes=['https://www.googleapis.com/auth/calendar']
+    )
     return creds
 
 
-def get_credentials(option):
-    if option == 1:
-        return os.getenv('JESUS_EMAIL'), os.getenv('JESUS_PASSWORD')
-    elif option == 2:
-        return os.getenv('ENRIQUE_EMAIL'), os.getenv('ENRIQUE_PASSWORD')
-    elif option == 3:
-        # Return both sets of credentials
-        return (
-            (os.getenv('JESUS_EMAIL'), os.getenv('JESUS_PASSWORD')),
-            (os.getenv('ENRIQUE_EMAIL'), os.getenv('ENRIQUE_PASSWORD'))
-        )
+def get_credentials():
+    return (
+        (os.getenv('JESUS_EMAIL'), os.getenv('JESUS_PASSWORD')),
+        (os.getenv('ENRIQUE_EMAIL'), os.getenv('ENRIQUE_PASSWORD'))
+    )
 
 
 def acc_log_out(driver):
@@ -84,14 +80,14 @@ def get_table(email, password) -> (list[str], list[list[str]]):
         print("We have failed to load into the home page. Did we sign in correctly?")
         return  # Terminate Script
 
-    try:
-        # Wait for home page to load to find Entries Button
-        loadMoreBtn = WebDriverWait(driver, 1).until(
-            EC.element_to_be_clickable((By.ID, "btnLoadmore"))
-        )
-        loadMoreBtn.click()
-    except TimeoutException:
-        print("No more new entries loaded.")
+    # try:
+    #     # Wait for home page to load to find Entries Button
+    #     loadMoreBtn = WebDriverWait(driver, 1).until(
+    #         EC.element_to_be_clickable((By.ID, "btnLoadmore"))
+    #     )
+    #     loadMoreBtn.click()
+    # except TimeoutException:
+    #     print("No more new entries loaded.")
 
     # Extract table's header from thead
     table_thead = WebDriverWait(driver, 10).until(
@@ -117,9 +113,12 @@ def get_table(email, password) -> (list[str], list[list[str]]):
     return header, data
 
 
-def to_dataframe(table_header, table_data) -> pd.DataFrame:
+def to_dataframe(table_header, table_data, emp_name) -> pd.DataFrame:
     df = pd.DataFrame(data=table_data, columns=table_header)
     df = df.set_index('Id')  # Set Id column as the index
+
+    # Adds employee name for all rows
+    df['Employee Name'] = emp_name
 
     # Get rid of any currently Opened or Rejected Services
     df = df.drop(df[(df['Status'] == 'Open') | (df['Status'] == 'Rejected')].index, axis='index')
@@ -152,15 +151,42 @@ def to_dataframe(table_header, table_data) -> pd.DataFrame:
         format=f'{date_format} {time_format}'
     )
 
-    # Convert Service Date to pure date (no time component)
+    # Convert Service Date to pure date
     df['Service Date'] = pd.to_datetime(df['Service Date'],
                                         format=date_format).dt.normalize()  # Normalize since we don't care about time
 
     # Drops unwanted columns
-    keep_columns = ['Service Date', 'Start Time', 'End Time', 'Amount', 'Service Code', 'Status']
+    keep_columns = ['Service Date', 'Start Time', 'End Time', 'Amount', 'Service Code', 'Status', 'Employee Name']
     df = df[keep_columns]
 
     return df
+
+
+def save_new_entries(df: pd.DataFrame) -> pd.DataFrame:
+    file = 'entries.csv'
+
+    # If file doesn't exist, save the new DataFrame directly
+    if not os.path.exists(file):
+        df.to_csv(file)
+        return df
+
+        # Read existing data with proper dtypes
+    old_df = pd.read_csv(
+        file,
+        index_col='Id',
+        parse_dates=['Service Date', 'Start Time', 'End Time'],
+        dtype={'Amount': 'str'}  # Prevents auto-inference issues
+    )
+    old_df['Amount'] = pd.to_timedelta(old_df['Amount'])
+
+    # Combine old and new data, drop duplicates, and sort
+    new_df = pd.concat([old_df, df], axis=0)
+    new_df.drop_duplicates(inplace=True)
+    new_df.sort_index(ascending=False, inplace=True, key=lambda x: x.astype(int))
+
+    # Save back to CSV
+    new_df.to_csv(file)
+    return new_df
 
 
 def format_hhmmss(td) -> str:
@@ -313,7 +339,7 @@ def add_calendar_event(service, summary, start_time, end_time, color_id):
     ).execute()
 
 
-def process_punch_data(df, target_date, employee, service):
+def process_punch_data(df: pd.DataFrame, target_date, service):
     EMPLOYEE_COLORS = {
         "Jesus": 2,  # Green
         "Enrique": 9  # Blue
@@ -328,75 +354,61 @@ def process_punch_data(df, target_date, employee, service):
 
         add_calendar_event(
             service=service,
-            summary=f"{employee} ({row['Service Code']}) {format_hhmmss(row['Amount'])[:-3]}hrs",
+            summary=f"{row['Employee Name']} ({row['Service Code']}) {format_hhmmss(row['Amount'])[:-3]}hrs",
             start_time=row['Start Time'],
             end_time=row['End Time'],
-            color_id=EMPLOYEE_COLORS.get(employee, 1)
+            color_id=EMPLOYEE_COLORS.get(row['Employee Name'], 1)
         )
 
 
 def main():
-    input_msg = '''Who do you want to get entries from?
-1. Jesus Donate
-2. Enrique Donate
-3. Both
-'''
-    option = int(input(input_msg))
+    target_date = date.today()
 
-    # Ask for month selection
-    month_msg = '''Select month option:
-1. Current month
-2. Specific month (YYYY-MM)
-'''
-    month_option = int(input(month_msg))
+    # Uncomment if you want to look at a specific month
+#     # Ask for month selection
+#     month_msg = '''Select month option:
+# 1. Current month
+# 2. Specific month (YYYY-MM)
+# '''
+#     month_option = int(input(month_msg))
+#
+#     if month_option == 1:  # Current month
+#         target_date = date.today()
+#     elif month_option == 2:  # Specific month
+#         while True:  # Keep asking until valid input
+#             month_input = input("Enter month (YYYY-MM): ")
+#             try:
+#                 target_date = pd.to_datetime(month_input).date()
+#                 break
+#             except ValueError:
+#                 print("Invalid format. Please enter in YYYY-MM format (e.g., 2025-06).")
+#     else:
+#         print("Invalid month option. Choose 1 (current) or 2 (specific).")
+#         return
 
-    if month_option == 1:  # Current month
-        target_date = date.today()
-    elif month_option == 2:  # Specific month
-        month_input = input("Enter month (YYYY-MM): ")
-        target_date = pd.to_datetime(month_input).date()
-    else:
-        print("Invalid month option")
-        return
-
-    # Google Authentication
+    # Service Account Authentication
     creds = authenticate()
     service = build('calendar', 'v3', credentials=creds)
 
-    if option in {1, 2}:
-        email, password = get_credentials(option)
-        table_header, table_data = get_table(email=email, password=password)
-        df = to_dataframe(table_header, table_data)
-        first_biweekly_formatted, second_biweekly_formatted, month_formatted = calculate_hours(df, target_date)
-        print(f'\n\n ** Date: {target_date.year}/{target_date.month} **')
-        print(f'First Biweekly Hours:  {first_biweekly_formatted}')
-        print(f'Second Biweekly Hours: {second_biweekly_formatted}')
-        print(f'Month Hours:           {month_formatted}')
+    # Handle both cases
+    jesus_creds, enrique_creds = get_credentials()
+    # Process Jesus
+    j_table_header, j_table_data = get_table(*jesus_creds)
+    j_df = to_dataframe(j_table_header, j_table_data, 'Jesus')
 
-        # Adds entries to Acumen Punch-In Times Google Calendar
-        if option == 1:
-            process_punch_data(df, target_date, 'Jesus', service)
-        else:
-            process_punch_data(df, target_date, 'Enrique', service)
+    # Process Enrique
+    e_table_header, e_table_data = get_table(*enrique_creds)
+    e_df = to_dataframe(e_table_header, e_table_data, 'Enrique')
 
-    elif option == 3:
-        # Handle both cases
-        jesus_creds, enrique_creds = get_credentials(option)
-        # Process Jesus
-        j_table_header, j_table_data = get_table(*jesus_creds)
-        j_df = to_dataframe(j_table_header, j_table_data)
-        # Process Enrique
-        e_table_header, e_table_data = get_table(*enrique_creds)
-        e_df = to_dataframe(e_table_header, e_table_data)
+    save_new_entries(j_df)
+    df = save_new_entries(e_df)
 
-        print_hours(j_df, e_df, target_date)
+    j_df = df[df['Employee Name'] == 'Jesus']
+    e_df = df[df['Employee Name'] == 'Enrique']
+    print_hours(j_df, e_df, target_date)
 
-        # Adds entries to Acumen Punch-In Times Google Calendar
-        process_punch_data(j_df, target_date, 'Jesus', service)
-        process_punch_data(e_df, target_date, 'Enrique', service)
-
-    else:
-        print("Invalid option")
+    # Adds entries to Acumen Punch-In Times Google Calendar
+    process_punch_data(df, target_date, service)
 
 
 if __name__ == '__main__':
