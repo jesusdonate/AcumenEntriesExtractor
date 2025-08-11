@@ -13,7 +13,6 @@ from googleapiclient.discovery import build
 from datetime import date, datetime
 import pytz
 
-
 # Load environment variables from .env file
 load_dotenv()
 
@@ -424,27 +423,27 @@ def process_punch_data(df: pd.DataFrame, target_date, service):
 def main():
     target_date = date.today()
 
-    # Uncomment if you want to look at a specific month
-#     # Ask for month selection
-#     month_msg = '''Select month option:
-# 1. Current month
-# 2. Specific month (YYYY-MM)
-# '''
-#     month_option = int(input(month_msg))
-#
-#     if month_option == 1:  # Current month
-#         target_date = date.today()
-#     elif month_option == 2:  # Specific month
-#         while True:  # Keep asking until valid input
-#             month_input = input("Enter month (YYYY-MM): ")
-#             try:
-#                 target_date = pd.to_datetime(month_input).date()
-#                 break
-#             except ValueError:
-#                 print("Invalid format. Please enter in YYYY-MM format (e.g., 2025-06).")
-#     else:
-#         print("Invalid month option. Choose 1 (current) or 2 (specific).")
-#         return
+    # If Mac or Windows, ask user for month option
+    if sys.platform != 'linux':
+        month_msg = '''Select month option:
+1. Current month
+2. Specific month (YYYY-MM)
+'''
+        month_option = int(input(month_msg))
+
+        if month_option == 1:  # Current month
+            target_date = date.today()
+        elif month_option == 2:  # Specific month
+            while True:  # Keep asking until valid input
+                month_input = input("Enter month (YYYY-MM): ")
+                try:
+                    target_date = pd.to_datetime(month_input).date()
+                    break
+                except ValueError:
+                    print("Invalid format. Please enter in YYYY-MM format (e.g., 2025-06).")
+        else:
+            print("Invalid month option. Choose 1 (current) or 2 (specific).")
+            return
 
     # Service Account Authentication
     creds = authenticate()
