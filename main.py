@@ -180,7 +180,8 @@ def to_dataframe(table_header, table_data, emp_name) -> pd.DataFrame:
     df['Employee Name'] = emp_name
 
     # Get rid of any currently Opened or Rejected Services
-    df = df.drop(df[(df['Status'] == 'Open') | (df['Status'] == 'Rejected')].index, axis='index')
+    df = df.drop(df[(df['Status'] == 'Open') | (df['Status'] == 'Rejected') | (df['Status'] == 'Unvalidated')].index,
+                 axis='index')
 
     # Service is of type int
     df['Service Code'] = df['Service Code'].astype(int)
@@ -229,21 +230,24 @@ def save_new_entries(df: pd.DataFrame) -> pd.DataFrame:
         df.to_csv(file)
         return df
 
-        # Read existing data with proper dtypes
+    # Read existing data with proper type conversion
     old_df = pd.read_csv(
         file,
-        index_col='Id',
-        parse_dates=['Service Date', 'Start Time', 'End Time'],
-        dtype={'Amount': 'str'}  # Prevents auto-inference issues
+        dtype={'Id': 'int64', 'Amount': 'str'},
+        parse_dates=['Service Date', 'Start Time', 'End Time']  # Convert to datetime
     )
     old_df['Amount'] = pd.to_timedelta(old_df['Amount'])
+    old_df = old_df.set_index('Id')
 
-    # Combine old and new data, drop duplicates, and sort
-    new_df = pd.concat([old_df, df], axis=0)
-    new_df.drop_duplicates(inplace=True)
-    new_df.sort_index(ascending=False, inplace=True, key=lambda x: x.astype(int))
+    # Ensure new dataframe's index is integer type
+    df.index = df.index.astype('int64')
 
-    # Save back to CSV
+    # Combine and remove Id duplicates
+    new_df = pd.concat([old_df, df])
+    new_df = new_df[~new_df.index.duplicated(keep='first')]
+
+    # Sort and save
+    new_df.sort_index(ascending=False, inplace=True)
     new_df.to_csv(file)
     return new_df
 
