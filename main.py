@@ -4,6 +4,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 import pandas as pd
 import os
 import sys
@@ -12,6 +13,9 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import date, datetime
 import pytz
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # Load environment variables from .env file
 load_dotenv()
@@ -30,8 +34,8 @@ def authenticate():
 
 def get_credentials():
     return (
-        (os.getenv('JESUS_EMAIL'), os.getenv('JESUS_PASSWORD')),
-        (os.getenv('ENRIQUE_EMAIL'), os.getenv('ENRIQUE_PASSWORD'))
+        (os.getenv('JESUS_USERNAME'), os.getenv('JESUS_PASSWORD')),
+        (os.getenv('ENRIQUE_USERNAME'), os.getenv('ENRIQUE_PASSWORD'))
     )
 
 
@@ -51,7 +55,7 @@ def acc_log_out(driver):
         print("Failed to Log Out!")
 
 
-def set_chrome_options():
+def get_chrome_options():
     """Configure Chrome options for both Windows and Linux"""
     chrome_options = Options()
 
@@ -74,12 +78,12 @@ def set_chrome_options():
 
 def initialize_driver():
     """Initialize WebDriver with platform-specific settings"""
-    chrome_options = set_chrome_options()
+    chrome_options = get_chrome_options()
 
     try:
         if sys.platform == 'linux':
             return webdriver.Chrome(
-                executable_path="/usr/local/bin/chromedriver",
+                service=Service("/usr/local/bin/chromedriver"),
                 options=chrome_options
             )
         else:  # Windows/Mac
@@ -310,7 +314,7 @@ def get_biweekly_data(df, target_date):
     return first_biweekly, second_biweekly
 
 
-def calculate_hours(df, target_date):
+def calculate_hours(df, target_date) -> (dict, dict, dict):
     df = get_month_data(df, target_date)
     first_biweekly_df, second_biweekly_df = get_biweekly_data(df, target_date)
 
@@ -424,6 +428,81 @@ def process_punch_data(df: pd.DataFrame, target_date, service):
         )
 
 
+def send_email(
+        sender_email: str,
+        sender_password: str,
+        recipient_email: str,
+        subject: str,
+        message: str,
+        smtp_server: str = "smtp.gmail.com",
+        smtp_port: int = 587
+):
+    """Send a regular email using SMTP."""
+
+    html_message = message.replace('\n', '<br>')  # Newlines
+
+    # Create email with both plain and HTML versions
+    msg = MIMEMultipart('alternative')
+    msg['From'] = sender_email
+    msg['To'] = recipient_email
+    msg['Subject'] = subject
+
+    # Plain-text fallback
+    msg.attach(MIMEText(message, 'plain'))
+
+    # HTML version
+    msg.attach(MIMEText(f"""
+        <html>
+          <body>
+            <p>{html_message}</p>
+          </body>
+        </html>
+        """, 'html'))
+
+    # Send email
+    try:
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.sendmail(sender_email, recipient_email, msg.as_string())
+    except Exception as e:
+        print(f"Failed to send email: {str(e)}")
+
+
+def email_employee(df: pd.DataFrame, employee_name: str, target_date: datetime.date):
+    recipient_email = os.getenv(f'{employee_name.strip().upper()}_EMAIL')
+
+    if recipient_email is None:
+        print('Failed to email employee. Employee\'s not in .env file.')
+        return
+
+    first_biweekly_formatted, second_biweekly_formatted, month_formatted = calculate_hours(df, target_date)
+    subject = f"{target_date.strftime('%m/%d/%Y')} - Acumen horas de {employee_name}"
+    message = f"""<strong>Primera Quincena:</strong>
+331 -> {first_biweekly_formatted['331'][:-3]}hrs
+320 -> {first_biweekly_formatted['320'][:-3]}hrs
+310 -> {first_biweekly_formatted['310'][:-3]}hrs
+
+<strong>Segunda Qunicena:</strong>
+331 -> {second_biweekly_formatted['331'][:-3]}hrs
+320 -> {second_biweekly_formatted['320'][:-3]}hrs
+310 -> {second_biweekly_formatted['310'][:-3]}hrs
+
+<strong>Total Horas del mes:</strong>
+331 -> {month_formatted['331'][:-3]}hrs
+320 -> {month_formatted['320'][:-3]}hrs
+310 -> {month_formatted['310'][:-3]}hrs
+"""
+
+    send_email(
+        sender_email=os.getenv('JESUS_EMAIL'),
+        sender_password=os.getenv('JESUS_GMAIL_APP_PASSWORD'),
+        recipient_email=recipient_email,
+        subject=subject,
+        message=message
+    )
+
+
 def main():
     target_date = date.today()
 
@@ -469,6 +548,10 @@ def main():
     j_df = df[df['Employee Name'] == 'Jesus']
     e_df = df[df['Employee Name'] == 'Enrique']
     print_hours(j_df, e_df, target_date)
+
+    if sys.platform == 'linux':  # Send emails when using EC2 instance only
+        email_employee(j_df, 'Jesus', target_date)
+        email_employee(e_df, 'Enrique', target_date)
 
     # Adds entries to Acumen Punch-In Times Google Calendar
     process_punch_data(df, target_date, service)
