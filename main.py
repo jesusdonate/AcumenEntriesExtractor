@@ -478,7 +478,9 @@ def email_employee(df: pd.DataFrame, employee_name: str, target_date: datetime.d
 
     first_biweekly_formatted, second_biweekly_formatted, month_formatted = calculate_hours(df, target_date)
     subject = f"{target_date.strftime('%m/%d/%Y')} - Acumen horas de {employee_name}"
-    message = f"""<strong>Primera Quincena:</strong>
+    message = f"""Estas son las horas completadas de <strong>{target_date.strftime('%m/%Y')}</strong>
+    
+<strong>Primera Quincena:</strong>
 331 -> {first_biweekly_formatted['331'][:-3]}hrs
 320 -> {first_biweekly_formatted['320'][:-3]}hrs
 310 -> {first_biweekly_formatted['310'][:-3]}hrs
