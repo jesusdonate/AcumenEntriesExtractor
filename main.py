@@ -249,7 +249,7 @@ def to_dataframe(table_header, table_data, emp_name) -> pd.DataFrame:
 
 
 def get_mongodb_collection():
-    uri = os.getenv('mongodb_uri')
+    uri = os.getenv('MONGODB_URI')
     client = MongoClient(uri, server_api=ServerApi('1'))
     client.admin.command('ping')
     acumen_db = client.get_database('Acumen')
