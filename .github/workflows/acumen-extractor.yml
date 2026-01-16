@@ -1,0 +1,102 @@
+name: Acumen Daily Automation
+
+on:
+  # Scheduled trigger: 11:56 PM Los Angeles time daily
+  schedule:
+    - cron: '56 7 * * *' 
+    
+  # Manual trigger workflow
+  workflow_dispatch:
+
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest  # Linux virtual machine
+    timeout-minutes: 4     # Prevent hanging jobs
+    
+    env:
+      TZ: America/Los_Angeles
+      
+    steps:
+    # Step 1: Checkout my code
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    # Step 2: Set up Python
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'  # Cache dependencies for faster runs
+        
+    # Step 3: Install Chrome Browser
+    - name: Install Chrome
+      uses: browser-actions/setup-chrome@v1
+      with:
+        chrome-version: stable
+        
+    # Step 4: Verify Chrome installation
+    - name: Test Chrome
+      run: |
+        echo "Testing Chrome installation..."
+        google-chrome --version
+        which google-chrome
+      
+    # Step 5: Install Python dependencies
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install webdriver-manager
+
+    # Testing Simple Script
+    - name: Simple Python test
+      run: |
+        python -c "
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        import sys
+        
+        print(f'Python version: {sys.version}')
+        print('Testing headless Chrome...')
+        
+        options = Options()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        
+        try:
+            driver = webdriver.Chrome(options=options)
+            driver.get('https://www.google.com')
+            print(f'✅ Success! Page title: {driver.title}')
+            driver.quit()
+        except Exception as e:
+            print(f'❌ Error: {e}')
+        "
+        
+    # Step 6: Create service account JSON file
+    - name: Create service account key
+      run: |
+        # Create the JSON file from GitHub secret
+        echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > acumen-entries-extractor-d2640e073bc3.json
+        echo "✅ Service account file created"
+        
+    # Step 7: Run Acumen script
+    - name: Run Acumen Extractor
+      env:
+        # Set all your environment variables
+        JESUS_USERNAME: ${{ secrets.JESUS_USERNAME }}
+        JESUS_PASSWORD: ${{ secrets.JESUS_PASSWORD }}
+        ENRIQUE_USERNAME: ${{ secrets.ENRIQUE_USERNAME }}
+        ENRIQUE_PASSWORD: ${{ secrets.ENRIQUE_PASSWORD }}
+        MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        CALENDAR_ID: ${{ secrets.CALENDAR_ID }}
+        JESUS_EMAIL: ${{ secrets.JESUS_EMAIL }}
+        JESUS_GMAIL_APP_PASSWORD: ${{ secrets.JESUS_GMAIL_APP_PASSWORD }}
+        ENRIQUE_EMAIL: ${{ secrets.ENRIQUE_EMAIL }}
+        
+      run: |
+        echo "Current time in LA: $(TZ=America/Los_Angeles date)"
+        echo "Running script..."
+        python main.py
+        
