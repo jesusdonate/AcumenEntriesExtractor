@@ -5,4 +5,4 @@ google-api-python-client>=2.0.0
 google-auth>=2.0.0
 pytz>=2022.1
 pymongo>=4.0.0
-webdriver-manager>=3.8.0
+webdriver-manager>=4.0.1
