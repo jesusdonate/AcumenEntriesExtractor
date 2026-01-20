@@ -30,6 +30,10 @@ ORIGINAL_LANG = ''  # Stores user's language in Acumen
 
 
 def authenticate():
+    """
+    Authenticate with Google Calendar API using service account credentials.
+    Returns credentials object for Google Calendar API access.
+    """
     creds = service_account.Credentials.from_service_account_file(
         SERVICE_ACCOUNT_PATH,
         scopes=['https://www.googleapis.com/auth/calendar']
@@ -38,6 +42,9 @@ def authenticate():
 
 
 def get_credentials():
+    """
+    Retrieve Acumen login credentials for both users from environment variables.
+    """
     return (
         (os.getenv('JESUS_USERNAME'), os.getenv('JESUS_PASSWORD')),
         (os.getenv('ENRIQUE_USERNAME'), os.getenv('ENRIQUE_PASSWORD'))
@@ -45,6 +52,11 @@ def get_credentials():
 
 
 def acc_log_out(driver):
+    """
+    Log out from Acumen and restore original language setting.
+    Attempts to clean up session before closing browser.
+    Silently fails if logout elements are not found (prints warning).
+    """
     try:
         # Change language back to user's original language
         dropdown_element = WebDriverWait(driver, 2).until(
@@ -108,7 +120,18 @@ def initialize_driver():
 
 
 def handle_login(driver, email, password):
-    """Handle the login process with error checking"""
+    """
+    Handle the complete Acumen login process including:
+    1. Navigate to Acumen login page
+    2. Enter username and password credentials
+    3. Submit login form
+    4. Handle potential security confirmation popup (if present)
+    5. Detect current language setting and store it globally
+    6. Switch interface language to English for consistent parsing
+
+    Returns: Boolean indicating success/failure of login attempt
+    Handles: Timeouts, missing elements, and unexpected page flows
+    """
     try:
         driver.get("https://acumen.dcisoftware.com/")
 
@@ -147,7 +170,18 @@ def handle_login(driver, email, password):
 
 
 def get_table_data(driver):
-    """Extract table headers and data"""
+    """
+    Navigate to and extract punch/entry data from Acumen's time tracking table.
+
+    Steps:
+    1. Click the 'Employer Punches' link in the left menu
+    2. Wait for the data table to load
+    3. Extract column headers from the table's <thead> section
+    4. Extract row data from the table's <tbody> section
+
+    Returns: Tuple of (list_of_headers, list_of_row_data) or (None, None) on failure
+    Each row data is a list of cell text values matching the header structure
+    """
     try:
         # Wait for and click entries button
         WebDriverWait(driver, 10).until(
@@ -174,7 +208,19 @@ def get_table_data(driver):
 
 
 def get_table(email: str, password: str) -> tuple[list[str], list[list[str]]]:
-    """Main function to retrieve table data"""
+    """
+    Arrange complete data extraction pipeline for a single user.
+
+    Execution flow:
+    1. Initialize Chrome WebDriver with platform-specific configuration
+    2. Attempt login with provided credentials
+    3. If login successful, navigate to and extract table data
+    4. Always attempt graceful logout and driver cleanup
+    5. Return extracted data or empty collections on any failure
+
+    Resource management: Ensures WebDriver is properly closed even on errors
+    Error isolation: Individual user failures don't affect other extractions
+    """
     driver = None
     try:
         driver = initialize_driver()
@@ -202,6 +248,21 @@ def get_table(email: str, password: str) -> tuple[list[str], list[list[str]]]:
 
 
 def to_dataframe(table_header, table_data, emp_name) -> pd.DataFrame:
+    """
+    Transform raw HTML table data into structured pandas DataFrame.
+
+    Data transformation pipeline:
+    1. Create initial DataFrame from raw headers and data
+    2. Set 'Id' column as DataFrame index for unique row identification
+    3. Filter out 'Open' status entries (ongoing/incomplete work periods)
+    4. Add employee name column for data source tracking
+    5. Normalize data types: Service Code to string, Amount to timedelta
+    6. Parse and convert datetime strings with explicit format patterns
+    7. Calculate proper timedelta from HH:MM:SS formatted 'Amount' field
+    8. Select and retain only essential columns for downstream processing
+
+    Returns: Cleaned, typed DataFrame ready for analysis and storage
+    """
     df = pd.DataFrame(data=table_data, columns=table_header)
     df = df.set_index('Id')  # Set Id column as the index
     df.drop(df[(df['Status'] == 'Open')].index, axis='index', inplace=True)  # Removes any ongoing entries
@@ -249,6 +310,7 @@ def to_dataframe(table_header, table_data, emp_name) -> pd.DataFrame:
 
 
 def get_mongodb_collection():
+    """Establish and validate connection to MongoDB database."""
     uri = os.getenv('MONGODB_URI')
     client = MongoClient(uri, server_api=ServerApi('1'))
     client.admin.command('ping')
@@ -257,7 +319,23 @@ def get_mongodb_collection():
 
 
 def get_month_entries_db(target_date: datetime.date) -> pd.DataFrame:
-    """Read entries from MongoDB for target date only"""
+    """
+    Retrieve all work entries from MongoDB for a specific calendar month.
+
+    Query logic:
+    1. Calculate date range for entire target month (1st day to 1st of next month)
+    2. Query MongoDB for entries with 'Service Date' within this range
+    3. Convert MongoDB documents to pandas DataFrame
+    4. Transform data types to match application's internal data structure
+
+    Data transformations:
+    - Rename MongoDB '_id' field to 'Id' for DataFrame index compatibility
+    - Convert string fields to proper datetime/timedelta objects
+    - Normalize date-only fields to remove time components
+
+    Returns: DataFrame of month's entries, or empty DataFrame if no data found
+    Handles: Connection errors, empty results, and data type conversion issues
+    """
     client, entries_collection = get_mongodb_collection()
 
     try:
@@ -313,6 +391,25 @@ def get_month_entries_db(target_date: datetime.date) -> pd.DataFrame:
 
 
 def update_entries(df: pd.DataFrame, rejected_ids: list[int]):
+    """
+    Synchronize local DataFrame entries with MongoDB database.
+
+    Two-phase synchronization:
+    1. Cleanup Phase: Remove rejected entries (status = 'Rejected') from database
+    2. Insert Phase: Add new entries that don't already exist in database
+
+    Insert logic:
+    - Only inserts entries whose IDs don't already exist in MongoDB
+    - Converts pandas Timedelta objects to string format for MongoDB storage
+    - Preserves original DataFrame index as MongoDB '_id' field
+
+    Performance optimization:
+    - Uses MongoDB's $in operator for batch ID lookups
+    - Performs bulk delete operations for rejected entries
+    - Executes bulk insert for new entries
+
+    Note: Updates existing entries but doesn't modify them (upsert not implemented)
+    """
     client, entries_collection = get_mongodb_collection()
 
     try:
@@ -365,6 +462,30 @@ def update_entries(df: pd.DataFrame, rejected_ids: list[int]):
 
 
 def sync_entries(cur_df: pd.DataFrame, target_date: datetime.date, service) -> pd.DataFrame:
+    """
+    Synchronize newly extracted entries with existing database entries for a target month.
+
+    Synchronization strategy:
+    1. Filter current entries to target month only (year and month match)
+    2. Load existing entries from MongoDB for same month
+    3. Handle edge cases: empty new data, empty existing data
+    4. Identify and process rejected entries for deletion
+    5. Merge current and old data, removing invalid statuses
+    6. Update database with merged results and clean Google Calendar
+
+    Rejection handling:
+    - Identifies entries marked 'Rejected' in current data that exist in database
+    - Removes these entries from both dataframes and database
+    - Deletes corresponding Google Calendar events
+
+    Merge logic:
+    - Combines current and historical entries
+    - Drops entries with 'Open', 'Rejected', or 'Unvalidated' statuses
+    - Removes duplicate entries (keeping first occurrence)
+    - Preserves all valid, completed work entries
+
+    Returns: Cleaned, merged DataFrame ready for reporting and analysis
+    """
     # Ensure that cur_df contains only entries from target date
     cur_df = cur_df[
         (cur_df['Service Date'].dt.year == target_date.year) &
@@ -413,6 +534,10 @@ def sync_entries(cur_df: pd.DataFrame, target_date: datetime.date, service) -> p
 
 
 def format_hhmmss(td: timedelta) -> str:
+    """
+    Convert timedelta object to standardized HH:MM:SS string format.
+    Returns: Formatted time string suitable for display and reporting
+    """
     total_seconds = int(td.total_seconds())
     hours = total_seconds // 3600
     minutes = (total_seconds % 3600) // 60
@@ -471,6 +596,21 @@ def get_biweekly_data(df, target_date: datetime.date):
 
 
 def calculate_hours(df, target_date: datetime.date) -> (dict, dict, dict):
+    """
+       Calculate hour totals for three time periods: first biweekly, second biweekly, and full month.
+
+       Calculation process:
+       1. Filter DataFrame to target month only
+       2. Split data into two biweekly periods (1st-15th, 16th-end)
+       3. Sum hours for each service code (310, 320, 331) and total hours per period
+       4. Format timedelta sums to human-readable HH:MM:SS strings
+
+       Returns: Three dictionaries containing formatted hour totals:
+       - first_biweekly_formatted: Hours for days 1-15 of month
+       - second_biweekly_formatted: Hours for days 16-end of month
+       - month_formatted: Hours for entire month
+       Each dict contains: '331', '320', '310', 'Total Hours' keys
+       """
     df = get_month_data(df, target_date)
     first_biweekly_df, second_biweekly_df = get_biweekly_data(df, target_date)
 
@@ -513,6 +653,11 @@ def calculate_hours(df, target_date: datetime.date) -> (dict, dict, dict):
 
 
 def print_hours(df: pd.DataFrame, target_date: datetime.date):
+    """
+    Display formatted hour calculations for each employee in the dataset.
+    Output is designed for console readability with aligned columns and clear
+    separation between employees.
+    """
     emps_list = list(df['Employee Name'].unique())
     for emp in emps_list:
         only_emp_df = df[df['Employee Name'] == emp]
@@ -523,6 +668,18 @@ def print_hours(df: pd.DataFrame, target_date: datetime.date):
 
 
 def event_exists(service, start_time: datetime, end_time: datetime):
+    """
+    Check if a Google Calendar event already exists for a specific time slot.
+
+    Search logic:
+    1. Convert start/end times to Los Angeles timezone (PST/PDT)
+    2. Query Google Calendar for events within the exact time range
+    3. Use singleEvents=True to expand recurring events
+    4. Return True if any events found, False if time slot is available
+
+    Time range is inclusive-exclusive: [timeMin, timeMax)
+    Used to prevent duplicate calendar entries for the same work shift.
+    """
     # Localizes timezone to calendar's timezone
     la_tz = pytz.timezone('America/Los_Angeles')
     time_min = la_tz.localize(start_time)
@@ -542,6 +699,22 @@ def event_exists(service, start_time: datetime, end_time: datetime):
 
 
 def add_calendar_event(service, summary, start_time, end_time, color_id, entry_id: int):
+    """
+    Create a new Google Calendar event for a work shift and store its ID.
+
+    Event creation:
+    1. Builds event object with summary, timezone-aware start/end times
+    2. Assigns color based on employee (green for Jesus, blue for Enrique)
+    3. Inserts event into specified Google Calendar
+    4. Stores the Google event ID in MongoDB for future reference
+
+    Event format includes:
+    - Summary: "Employee (Service Code) HH:MMhrs" (e.g., "Jesus (331) 04:30hrs")
+    - Timezone: Always America/Los_Angeles for consistency
+    - Color coding: Visual distinction between employees
+
+    Links calendar event to database entry via entry_id for synchronization.
+    """
     event = {
         'summary': summary,
         'start': {
@@ -566,11 +739,16 @@ def add_calendar_event(service, summary, start_time, end_time, color_id, entry_i
 
 def delete_calendar_event(service, entry_id: int):
     """
-    Delete an event from Google Calendar by event ID
+    Delete a Google Calendar event associated with a specific work entry.
 
-    Args:
-        service: Google Calendar service object
-        entry_id:
+    Process:
+    1. Look up Google Calendar event ID from MongoDB using entry_id
+    2. If no event ID found, skip deletion (entry may not have calendar event)
+    3. Execute Google Calendar API delete request for the event
+    4. Log success/failure for monitoring and debugging
+
+    Used when work entries are rejected or removed from the system to
+    maintain consistency between database and calendar visualization.
     """
     if entry_id:
         google_event_id = get_google_event_id(entry_id)
@@ -625,6 +803,21 @@ def get_google_event_id(entry_id: int) -> str | None:
 
 
 def process_punch_data(df: pd.DataFrame, target_date: datetime.date, service):
+    """
+    Create Google Calendar events for work entries that don't already exist.
+
+    Processing flow:
+    1. Filter DataFrame to target month only
+    2. Iterate through each work entry (row in DataFrame)
+    3. Check if calendar event already exists for that time slot
+    4. If no event exists, create new calendar event with:
+       - Employee name and service code in summary
+       - Formatted hours (HH:MM) for quick reference
+       - Color coding by employee (green for Jesus, blue for Enrique)
+
+    Prevents duplicate events by checking existing calendar entries before creation.
+    Color scheme provides visual distinction between employees' work schedules.
+    """
     EMPLOYEE_COLORS = {
         "Jesus": 2,  # Green
         "Enrique": 9  # Blue
@@ -656,7 +849,18 @@ def send_email(
         smtp_server: str = "smtp.gmail.com",
         smtp_port: int = 587
 ):
-    """Send a regular email using SMTP."""
+    """
+    Send email with both plain text and HTML versions for maximum compatibility.
+
+    Email construction:
+    1. Convert plain text message to HTML with <br> line breaks
+    2. Create MIME multipart message with alternative content types
+    3. Include both plain text (fallback) and HTML (preferred) versions
+    4. Send via SMTP with TLS encryption for security
+
+    Default configuration uses Gmail SMTP servers but can be customized.
+    Requires app-specific password when using Gmail with 2FA enabled.
+    """
 
     html_message = message.replace('\n', '<br>')  # Newlines
 
@@ -689,6 +893,23 @@ def send_email(
 
 
 def email_employee(df: pd.DataFrame, employee_name: str, target_date: datetime.date):
+    """
+    Send formatted hour summary email to a specific employee.
+
+    Email generation:
+    1. Look up employee's email from environment variables
+    2. Calculate hour totals for biweekly periods and full month
+    3. Format email with Spanish labels and structured hour breakdown
+    4. Send via Gmail SMTP with hour totals for each service code
+
+    Email content includes:
+    - Month/year reference in subject and body
+    - Three sections: first biweekly, second biweekly, monthly total
+    - Hours for each service code (331, 320, 310) in HH:MM format
+    - Clear visual hierarchy with HTML formatting
+
+    Returns silently if employee email is not configured.
+    """
     recipient_email = os.getenv(f'{employee_name.strip().upper()}_EMAIL')
 
     if recipient_email is None:
