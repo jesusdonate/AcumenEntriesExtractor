@@ -1,10 +1,9 @@
 name: Acumen Daily Automation
 
 on:
-  # Scheduled trigger: 11:50 PM Los Angeles time daily
-  # IMPORTANT: Must adjust to daylight savings time (on Mar 8, 2026, change to '10 6 * * *')
+  # Scheduled trigger: 10:00 PM Los Angeles time daily
   schedule:
-    - cron: '10 6 * * *' 
+  - cron: '0 5 * * *' 
     
   # Manual trigger workflow
   workflow_dispatch:
