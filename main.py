@@ -273,9 +273,24 @@ def to_dataframe(table_header, table_data, emp_name) -> pd.DataFrame:
     # Service is of type str
     df['Service Code'] = df['Service Code'].astype(str)
 
+    # Ensures there are no illogical time ranges
+    df = df[df['Start Time'] <= df['End Time']]
+
     # Create Hours and Minutes columns
-    df['Hours'] = df['Amount'].apply(lambda x: x.split(':')[1] if x else None)
-    df['Minutes'] = df['Amount'].apply(lambda x: x.split(':')[2] if x else None)
+    try:
+        df['Hours'] = df['Amount'].apply(lambda x: x.split(':')[1] if x else None)
+        df['Minutes'] = df['Amount'].apply(lambda x: x.split(':')[2] if x else None)
+    except IndexError as e:
+        # Eliminate row that has improper time format
+        imp_form_mask: pd.Series = ~(df['Amount'].str.fullmatch(r"\d:\d\d:\d\d"))
+        drop_indices = df.loc[imp_form_mask].index
+        df.drop(drop_indices, axis=0, inplace=True)
+        print("dropping series:", imp_form_mask)
+        print("dropping series:", drop_indices)
+        print("---------------------------------------------------")
+        print(df[['Amount', 'Start Time', 'End Time']])
+        df['Hours'] = df['Amount'].apply(lambda x: x.split(':')[1] if x else None)
+        df['Minutes'] = df['Amount'].apply(lambda x: x.split(':')[2] if x else None)
 
     # Combine 'Hours' and 'Minutes' into an 'HH:MM:00' format
     df['Amount'] = df['Hours'].astype(str) + ':' + df['Minutes'].astype(str) + ':00'
@@ -500,14 +515,16 @@ def sync_entries(cur_df: pd.DataFrame, target_date: datetime.date, service) -> p
 
     # No existing entries, just save the new ones
     if old_df.empty:
-        # Get rid of any currently Opened, Unvalidated, or Rejected Services
-        cur_df = cur_df.drop(cur_df[(cur_df['Status'] == 'Open') | (cur_df['Status'] == 'Rejected') | (
-                cur_df['Status'] == 'Unvalidated')].index, axis='index')
+        # Get rid of any currently Opened, Unvalidated, Rejected Services, or Canceled
+        cur_df = cur_df.drop(cur_df[(cur_df['Status'] == 'Open') | (cur_df['Status'] == 'Rejected') |
+                                    (cur_df['Status'] == 'Unvalidated') | (cur_df['Status'] == 'Canceled')].index,
+                             axis='index')
         update_entries(cur_df, [])
         return cur_df
 
-    # Finds entries that are rejected within cur_df and are in the old_df
-    rejected_entries_mask = (cur_df['Status'] == 'Rejected') & (cur_df.index.isin(old_df.index))
+    # Finds entries that are rejected or canceled within cur_df and are in the old_df
+    rejected_entries_mask = ((cur_df['Status'] == 'Rejected') | (cur_df['Status'] == 'Canceled')) & \
+                            (cur_df.index.isin(old_df.index))
 
     # Creates a list of rejected entries ids that should be removed from the Entries collection
     rejected_ids = list(cur_df[rejected_entries_mask].index)
@@ -523,8 +540,9 @@ def sync_entries(cur_df: pd.DataFrame, target_date: datetime.date, service) -> p
     new_df = pd.concat([cur_df, old_df])
 
     # Get rid of any currently Opened, Unvalidated, or Rejected Services
-    new_df = new_df.drop(new_df[(new_df['Status'] == 'Open') | (new_df['Status'] == 'Rejected') | (
-            new_df['Status'] == 'Unvalidated')].index, axis='index')
+    new_df = new_df.drop(new_df[(new_df['Status'] == 'Open') | (new_df['Status'] == 'Rejected') |
+                                (new_df['Status'] == 'Unvalidated') | (new_df['Status'] == 'Canceled')].index,
+                         axis='index')
 
     # Remove duplicates based on ID index
     new_df = new_df[~new_df.index.duplicated(keep='first')]
@@ -618,6 +636,7 @@ def calculate_hours(df, target_date: datetime.date) -> (dict, dict, dict):
         '331': first_biweekly_df[first_biweekly_df['Service Code'] == '331']['Amount'].sum(),
         '320': first_biweekly_df[first_biweekly_df['Service Code'] == '320']['Amount'].sum(),
         '310': first_biweekly_df[first_biweekly_df['Service Code'] == '310']['Amount'].sum(),
+        '338H': first_biweekly_df[first_biweekly_df['Service Code'] == '338H']['Amount'].sum(),
         'Total Hours': first_biweekly_df['Amount'].sum()
     }
 
@@ -625,6 +644,7 @@ def calculate_hours(df, target_date: datetime.date) -> (dict, dict, dict):
         '331': second_biweekly_df[second_biweekly_df['Service Code'] == '331']['Amount'].sum(),
         '320': second_biweekly_df[second_biweekly_df['Service Code'] == '320']['Amount'].sum(),
         '310': second_biweekly_df[second_biweekly_df['Service Code'] == '310']['Amount'].sum(),
+        '338H': second_biweekly_df[second_biweekly_df['Service Code'] == '338H']['Amount'].sum(),
         'Total Hours': second_biweekly_df['Amount'].sum()
     }
 
@@ -632,6 +652,7 @@ def calculate_hours(df, target_date: datetime.date) -> (dict, dict, dict):
         '331': df[df['Service Code'] == '331']['Amount'].sum(),
         '320': df[df['Service Code'] == '320']['Amount'].sum(),
         '310': df[df['Service Code'] == '310']['Amount'].sum(),
+        '338H': df[df['Service Code'] == '338H']['Amount'].sum(),
         'Total Hours': df['Amount'].sum()
     }
 
@@ -820,7 +841,8 @@ def process_punch_data(df: pd.DataFrame, target_date: datetime.date, service):
     """
     EMPLOYEE_COLORS = {
         "Jesus": 2,  # Green
-        "Enrique": 9  # Blue
+        "Enrique": 9,  # Blue
+        "Iris": 4  # Soft Red-Pink
     }
 
     df = get_month_data(df, target_date)
@@ -829,6 +851,8 @@ def process_punch_data(df: pd.DataFrame, target_date: datetime.date, service):
         # Skip if event exists
         if event_exists(service, row['Start Time'], row['End Time']):
             continue
+
+        print(entry_id, row['Start Time'], row['End Time'])
 
         add_calendar_event(
             service=service,
@@ -924,16 +948,19 @@ def email_employee(df: pd.DataFrame, employee_name: str, target_date: datetime.d
 331 -> {first_biweekly_formatted['331'][:-3]}hrs
 320 -> {first_biweekly_formatted['320'][:-3]}hrs
 310 -> {first_biweekly_formatted['310'][:-3]}hrs
+338H -> {first_biweekly_formatted['338H'][:-3]}hrs
 
 <strong>Segunda Qunicena:</strong>
 331 -> {second_biweekly_formatted['331'][:-3]}hrs
 320 -> {second_biweekly_formatted['320'][:-3]}hrs
 310 -> {second_biweekly_formatted['310'][:-3]}hrs
+338H -> {first_biweekly_formatted['338H'][:-3]}hrs
 
 <strong>Total Horas del mes:</strong>
 331 -> {month_formatted['331'][:-3]}hrs
 320 -> {month_formatted['320'][:-3]}hrs
 310 -> {month_formatted['310'][:-3]}hrs
+338H -> {first_biweekly_formatted['338H'][:-3]}hrs
 """
 
     send_email(
