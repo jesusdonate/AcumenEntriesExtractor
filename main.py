@@ -273,9 +273,6 @@ def to_dataframe(table_header, table_data, emp_name) -> pd.DataFrame:
     # Service is of type str
     df['Service Code'] = df['Service Code'].astype(str)
 
-    # Ensures there are no illogical time ranges
-    df = df[df['Start Time'] <= df['End Time']]
-
     # Create Hours and Minutes columns
     try:
         df['Hours'] = df['Amount'].apply(lambda x: x.split(':')[1] if x else None)
@@ -320,7 +317,6 @@ def to_dataframe(table_header, table_data, emp_name) -> pd.DataFrame:
     # Drops unwanted columns
     keep_columns = ['Service Date', 'Start Time', 'End Time', 'Amount', 'Service Code', 'Status', 'Employee Name']
     df = df[keep_columns]
-
     return df
 
 
